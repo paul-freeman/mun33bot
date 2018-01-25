@@ -1,17 +1,15 @@
 module Forms.UpdateBalances exposing (..)
 
-import Result exposing (toMaybe)
-import Maybe exposing (andThen)
-import Dict exposing (Dict)
+import Result
+import Maybe
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (onClick, onInput, onSubmit)
-import DriveState
 
 
 type alias Model =
     { accounts : List ( String, String )
-    , delete : Bool
+    , deleteView : Bool
     }
 
 
@@ -43,7 +41,7 @@ update msg model =
                 |> update ChangeView
 
         ChangeView ->
-            { model | delete = not model.delete }
+            { model | deleteView = not model.deleteView }
 
         UpdateDescription old new_ ->
             let
@@ -145,20 +143,65 @@ update msg model =
 
 view : (Msg -> msg) -> Model -> List (Html msg)
 view callback model =
-    List.concat (List.indexedMap (subView model.delete callback) model.accounts)
+    if model.deleteView then
+        deleteView callback model
+    else
+        updateView callback model
+
+
+updateView : (Msg -> msg) -> Model -> List (Html msg)
+updateView callback model =
+    List.map (updateInput callback) model.accounts
         ++ case validate model of
             Ok val ->
-                if model.delete then
-                    [ Html.button [ onClick (callback ChangeView) ] [ text "cancel" ] ]
-                else
-                    [ Html.button [ onClick (callback (AddAccount "new")) ] [ text "add" ]
-                    , Html.button [ onClick (callback ChangeView) ] [ text "delete" ]
-                    , Html.button [ onClick (callback (Submit val)) ] [ text "save" ]
-                    , Html.button [ onClick (callback Cancel) ] [ text "cancel" ]
-                    ]
+                [ Html.button [ onClick (callback (AddAccount "new")) ] [ text "add" ]
+                , Html.button [ onClick (callback ChangeView) ] [ text "delete" ]
+                , Html.button [ onClick (callback (Submit val)) ] [ text "save" ]
+                , Html.button [ onClick (callback Cancel) ] [ text "cancel" ]
+                ]
 
-            Err err ->
-                [ text err ]
+            Err _ ->
+                [ em [] [ text "error" ]
+                , br [] []
+                , Html.button [ onClick (callback Cancel) ] [ text "cancel" ]
+                ]
+
+
+updateInput : (Msg -> msg) -> ( String, String ) -> Html msg
+updateInput callback ( desc, bal ) =
+    div [ class "account" ]
+        [ input
+            [ class "account-description"
+            , type_ "text"
+            , value desc
+            , onInput (callback << UpdateDescription desc)
+            ]
+            []
+        , input
+            [ class "account-balance"
+            , type_ "text"
+            , value <| String.cons '$' bal
+            , onInput (callback << UpdateBalance desc)
+            ]
+            []
+        ]
+
+
+deleteView : (Msg -> msg) -> Model -> List (Html msg)
+deleteView callback model =
+    List.map (deleteButton callback) model.accounts
+        ++ [ Html.button [ onClick (callback ChangeView) ] [ text "cancel" ] ]
+
+
+deleteButton : (Msg -> msg) -> ( String, String ) -> Html msg
+deleteButton callback ( desc, bal ) =
+    div [ class "account" ]
+        [ button
+            [ class "account-delete-button"
+            , onClick (callback <| DeleteAccount desc)
+            ]
+            [ text (desc ++ " " ++ bal) ]
+        ]
 
 
 validate : Model -> Result String Validated
@@ -175,40 +218,3 @@ validate model =
                 List.map (\( k, v ) -> ( k, Result.withDefault 0.0 <| String.toFloat v ))
                     model.accounts
                     |> Ok
-
-
-subView : Bool -> (Msg -> msg) -> Int -> ( String, String ) -> List (Html msg)
-subView deleteView callback num account =
-    let
-        description =
-            Tuple.first account
-
-        balance =
-            Tuple.second account
-    in
-        [ div [ class "account" ]
-            (if deleteView then
-                [ button
-                    [ class "account-delete-button"
-                    , onClick (callback <| DeleteAccount description)
-                    ]
-                    [ text (description ++ " " ++ balance) ]
-                ]
-             else
-                [ input
-                    [ class "account-description"
-                    , type_ "text"
-                    , value description
-                    , onInput (callback << UpdateDescription description)
-                    ]
-                    []
-                , input
-                    [ class "account-balance"
-                    , type_ "text"
-                    , value <| String.cons '$' balance
-                    , onInput (callback << UpdateBalance description)
-                    ]
-                    []
-                ]
-            )
-        ]

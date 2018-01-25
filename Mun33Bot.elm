@@ -130,7 +130,7 @@ update msg model =
                                     List.map
                                         (\( k, v ) -> ( k, toString v ))
                                         model.state.accounts
-                                , delete = False
+                                , deleteView = False
                                 }
                         }
 
@@ -170,7 +170,7 @@ main =
                 , view = Load
                 , updating = True
                 , error = Nothing
-                , updateBalancesForm = { accounts = [], delete = False }
+                , updateBalancesForm = { accounts = [], deleteView = False }
                 }
         , view =
             (\model ->
