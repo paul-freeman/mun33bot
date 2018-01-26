@@ -3,16 +3,17 @@ module Mun33Bot exposing (..)
 {-| The main Mun33Bot code.
 -}
 
-import Dict exposing (Dict)
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (onClick, onInput, onSubmit)
 import Http
+import Task
+import Process
 import Json.Decode
 import Json.Encode
 import DriveState exposing (DriveState)
 import Helpers
-import Forms.UpdateBalances
+import Forms.UpdateBalances exposing (defaultModel)
 
 
 -- MUN33BOT MODEL
@@ -33,6 +34,7 @@ type Msg
     = NoOp
     | GetState
     | PostState
+    | PostStateNoWait
     | Response (Result Http.Error DriveState)
     | ChangeView View
     | UpdateBalancesCallback Forms.UpdateBalances.Msg
@@ -110,6 +112,9 @@ update msg model =
         PostState ->
             ( { model | updating = True }, Http.send Response (postRequest model.state) )
 
+        PostStateNoWait ->
+            ( model, postRequestNoWait model.state )
+
         ChangeView view ->
             case view of
                 Main ->
@@ -126,11 +131,11 @@ update msg model =
                         { model
                             | view = view
                             , updateBalancesForm =
-                                { accounts =
-                                    List.map
-                                        (\( k, v ) -> ( k, toString v ))
-                                        model.state.accounts
-                                , deleteView = False
+                                { defaultModel
+                                    | accounts =
+                                        List.map
+                                            (\( k, v ) -> ( k, toString v ))
+                                            model.state.accounts
                                 }
                         }
 
@@ -148,7 +153,7 @@ update msg model =
         UpdateBalancesCallback subMsg ->
             case subMsg of
                 Forms.UpdateBalances.Submit form ->
-                    update (ChangeView Save) { model | state = DriveState form }
+                    update PostStateNoWait { model | state = DriveState form }
 
                 Forms.UpdateBalances.Cancel ->
                     update (ChangeView Main) model
@@ -170,7 +175,7 @@ main =
                 , view = Load
                 , updating = True
                 , error = Nothing
-                , updateBalancesForm = { accounts = [], deleteView = False }
+                , updateBalancesForm = Forms.UpdateBalances.defaultModel
                 }
         , view =
             (\model ->
@@ -197,6 +202,14 @@ postRequest state =
             stateEncoder state |> Http.jsonBody
     in
         Http.post stateAddress body stateDecoder
+
+
+postRequestNoWait : DriveState -> Cmd Msg
+postRequestNoWait state =
+    postRequest state
+        |> Http.toTask
+        |> Process.spawn
+        |> Task.perform (\_ -> ChangeView Main)
 
 
 stateEncoder : DriveState -> Json.Encode.Value
@@ -239,4 +252,4 @@ stateDecoder =
 
 stateAddress : String
 stateAddress =
-    "http://127.0.0.1:5000/getState"
+    "/getState"

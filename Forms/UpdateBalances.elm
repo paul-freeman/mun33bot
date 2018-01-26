@@ -1,7 +1,5 @@
 module Forms.UpdateBalances exposing (..)
 
-import Result
-import Maybe
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (onClick, onInput, onSubmit)
@@ -9,7 +7,7 @@ import Html.Events exposing (onClick, onInput, onSubmit)
 
 type alias Model =
     { accounts : List ( String, String )
-    , deleteView : Bool
+    , view : View
     }
 
 
@@ -22,26 +20,38 @@ type Msg
     | UpdateDescription String String
     | AddAccount String
     | DeleteAccount String
-    | ChangeView
+    | ChangeView View
     | Submit Validated
     | Cancel
+
+
+type View
+    = Update
+    | Delete
+
+
+defaultModel : Model
+defaultModel =
+    { accounts = []
+    , view = Update
+    }
 
 
 update : Msg -> Model -> Model
 update msg model =
     case msg of
-        AddAccount new ->
-            if List.filter (\( k, v ) -> k == new) model.accounts /= [] then
-                update (AddAccount <| String.cons '*' new) model
+        AddAccount name ->
+            if accountExists name model.accounts then
+                update (AddAccount <| prependStar name) model
             else
-                { model | accounts = List.append model.accounts [ ( new, "0.00" ) ] }
+                { model | accounts = List.append model.accounts [ ( name, "0.00" ) ] }
 
         DeleteAccount name ->
             { model | accounts = List.filter (\( k, v ) -> k /= name) model.accounts }
-                |> update ChangeView
+                |> update (ChangeView Update)
 
-        ChangeView ->
-            { model | deleteView = not model.deleteView }
+        ChangeView view ->
+            { model | view = view }
 
         UpdateDescription old new_ ->
             let
@@ -143,10 +153,12 @@ update msg model =
 
 view : (Msg -> msg) -> Model -> List (Html msg)
 view callback model =
-    if model.deleteView then
-        deleteView callback model
-    else
-        updateView callback model
+    case model.view of
+        Update ->
+            updateView callback model
+
+        Delete ->
+            deleteView callback model
 
 
 updateView : (Msg -> msg) -> Model -> List (Html msg)
@@ -155,7 +167,7 @@ updateView callback model =
         ++ case validate model of
             Ok val ->
                 [ Html.button [ onClick (callback (AddAccount "new")) ] [ text "add" ]
-                , Html.button [ onClick (callback ChangeView) ] [ text "delete" ]
+                , Html.button [ onClick (callback (ChangeView Delete)) ] [ text "delete" ]
                 , Html.button [ onClick (callback (Submit val)) ] [ text "save" ]
                 , Html.button [ onClick (callback Cancel) ] [ text "cancel" ]
                 ]
@@ -190,7 +202,7 @@ updateInput callback ( desc, bal ) =
 deleteView : (Msg -> msg) -> Model -> List (Html msg)
 deleteView callback model =
     List.map (deleteButton callback) model.accounts
-        ++ [ Html.button [ onClick (callback ChangeView) ] [ text "cancel" ] ]
+        ++ [ Html.button [ onClick (callback (ChangeView Update)) ] [ text "cancel" ] ]
 
 
 deleteButton : (Msg -> msg) -> ( String, String ) -> Html msg
@@ -200,7 +212,7 @@ deleteButton callback ( desc, bal ) =
             [ class "account-delete-button"
             , onClick (callback <| DeleteAccount desc)
             ]
-            [ text (desc ++ " " ++ bal) ]
+            [ text (desc ++ " " ++ String.cons '$' bal) ]
         ]
 
 
@@ -218,3 +230,23 @@ validate model =
                 List.map (\( k, v ) -> ( k, Result.withDefault 0.0 <| String.toFloat v ))
                     model.accounts
                     |> Ok
+
+
+getAccountName : ( String, String ) -> String
+getAccountName =
+    Tuple.first
+
+
+getAccountNames : List ( String, String ) -> List String
+getAccountNames accountList =
+    List.map getAccountName accountList
+
+
+accountExists : String -> List ( String, String ) -> Bool
+accountExists name accountList =
+    List.member name (getAccountNames accountList)
+
+
+prependStar : String -> String
+prependStar s =
+    String.cons '*' s

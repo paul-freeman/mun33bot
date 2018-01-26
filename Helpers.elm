@@ -1,6 +1,11 @@
 module Helpers exposing (..)
 
 
+matchFirst : a -> ( a, b ) -> Bool
+matchFirst this ( that, _ ) =
+    this == that
+
+
 toCurrency : String -> String
 toCurrency s =
     case String.uncons s of
