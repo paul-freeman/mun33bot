@@ -2,17 +2,17 @@
 # pylint:disable=no-member
 import os
 import io
-import math
 import json
 import flask
 
 import google.oauth2.credentials
-import google_auth_oauthlib.flow
+from oauth2client.client import flow_from_clientsecrets
 import googleapiclient.discovery
 from googleapiclient.http import MediaIoBaseUpload
 
 APP = flask.Flask(__name__)
 APP.secret_key = 'a somewhat secret development key'
+FLOW = None
 
 CLIENT_SECRETS_FILE = os.path.join(APP.root_path, 'mun33bot_secret.json')
 
@@ -21,6 +21,10 @@ API_SERVICE_NAME = 'drive'
 API_VERSION = 'v3'
 
 JSON_FILENAME = 'mun33.json'
+
+LOCAL_STORE = True
+
+DEFAULT_STATE = {"accounts": []}
 
 @APP.route('/')
 def index():
@@ -34,43 +38,58 @@ def index_css():
 def index_js():
     return flask.send_file('mun33bot.js')
 
-@APP.route('/getState', methods=['GET', 'POST'])
+@APP.route('/favicon.ico')
+def index_ico():
+    return flask.send_file('robot.png')
+
+@APP.route('/getState', methods=['GET'])
 def get_state():
-    if 'credentials' not in flask.session:
-        return flask.redirect('authorize')
-    credentials = google.oauth2.credentials.Credentials(**flask.session['credentials'])
-    flask.session['credentials'] = credentials_to_dict(credentials)
-    drive = googleapiclient.discovery.build(API_SERVICE_NAME, API_VERSION, credentials=credentials)
-    state = get_state_data(drive)
-    if flask.request.method == 'POST':
+    if LOCAL_STORE:
+        try:
+            with open(JSON_FILENAME, 'r') as mun_dat:
+                state = json.load(mun_dat)
+        except FileNotFoundError:
+            state = DEFAULT_STATE
+    else:
+        if 'credentials' not in flask.session:
+            return flask.redirect('authorize')
+        credentials = google.oauth2.credentials.Credentials(**flask.session['credentials'])
+        flask.session['credentials'] = credentials_to_dict(credentials)
+        drive = googleapiclient.discovery.build(API_SERVICE_NAME, API_VERSION, credentials=credentials)
+        state = get_state_data(drive)
+        if flask.request.method == 'POST':
+            incoming = flask.request.get_json()
+            print('incoming = {}'.format(incoming))
+            state = incoming
+            set_state_data(drive, state)
+    return flask.jsonify(state)
+
+@APP.route('/setState', methods=['POST'])
+def set_state():
+    with open(JSON_FILENAME, 'w') as mun_dat:
         incoming = flask.request.get_json()
         print('incoming = {}'.format(incoming))
-        state = incoming
-        set_state_data(drive, state)
-    return flask.jsonify(state)
+        json.dump(mun_dat, incoming)
+    return flask.jsonify(incoming)
 
 @APP.route('/authorize')
 def authorize():
     """Login route"""
-    flow = google_auth_oauthlib.flow.Flow.from_client_secrets_file(
-        CLIENT_SECRETS_FILE, scopes=SCOPES)
-    flow.redirect_uri = flask.url_for('auth', _external=True)
-    authorization_url, state = flow.authorization_url(
-        access_type='offline',
-        include_granted_scopes='true')
-    flask.session['state'] = state
+    global FLOW
+    FLOW = flow_from_clientsecrets(
+        CLIENT_SECRETS_FILE,
+        scope=SCOPES,
+        redirect_uri=flask.url_for('authorized', _external=True)
+        )
+    authorization_url = FLOW.step1_get_authorize_url(
+        state=flask.session['state']
+        )
     return flask.redirect(authorization_url)
 
-@APP.route('/auth')
-def auth():
+@APP.route('/authorized')
+def authorized():
     """authorization callback"""
-    state = flask.session['state']
-    flow = google_auth_oauthlib.flow.Flow.from_client_secrets_file(
-        CLIENT_SECRETS_FILE, scopes=SCOPES, state=state)
-    flow.redirect_uri = flask.url_for('auth', _external=True)
-    authorization_response = flask.request.url
-    flow.fetch_token(authorization_response=authorization_response)
-    credentials = flow.credentials
+    credentials = FLOW.step2_exchange(flask.request.form['code'])
     flask.session['credentials'] = credentials_to_dict(credentials)
     return flask.redirect(flask.url_for('/'))
 
