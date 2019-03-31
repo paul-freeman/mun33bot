@@ -5,6 +5,7 @@ import Dict exposing (Dict)
 import Html.Styled exposing (..)
 import Html.Styled.Attributes exposing (..)
 import Html.Styled.Events exposing (..)
+import Process exposing (..)
 import Task exposing (perform)
 import Time exposing (Posix, every, now, posixToMillis)
 
@@ -21,8 +22,8 @@ type alias Model =
     { flags : Flags
     , filter : String
     , log : Dict Int ( LogLevel, String )
-    , logField : String
     , time : Int
+    , subCount : Int
     }
 
 
@@ -36,44 +37,42 @@ default : Model
 default =
     { flags =
         { displayTime = 15000
-        , tickTime = 1000
+        , tickTime = 500
         , purgeTime = 180000
         , logSize = 500
         }
     , filter = ""
     , log = Dict.empty
-    , logField = ""
     , time = 0
+    , subCount = 0
     }
 
 
 type Msg
     = AddToLog LogLevel String Posix
     | ChangeFilter String
-    | ChangeLogField String
     | Purge Posix
     | ScheduleAddToLog LogLevel String
     | Tick Posix
+    | AddToSubCount
+    | RemoveFromSubCount
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
         AddToLog logLevel message time ->
-            ( { model
-                | log =
-                    Dict.insert (posixToMillis time)
-                        ( logLevel, message )
-                        model.log
-              }
-            , Cmd.none
-            )
+            update AddToSubCount
+                { model
+                    | log =
+                        Dict.insert (posixToMillis time)
+                            ( logLevel, message )
+                            model.log
+                    , time = posixToMillis time
+                }
 
         ChangeFilter filter ->
             ( { model | filter = filter }, Cmd.none )
-
-        ChangeLogField message ->
-            ( { model | logField = message }, Cmd.none )
 
         Purge _ ->
             if Dict.size model.log > model.flags.logSize then
@@ -97,6 +96,14 @@ update msg model =
 
         Tick posixTime ->
             ( { model | time = posixToMillis posixTime }, Cmd.none )
+
+        AddToSubCount ->
+            ( { model | subCount = model.subCount + 1 }
+            , perform (\_ -> RemoveFromSubCount) <| sleep <| toFloat <| model.flags.displayTime + 2 * model.flags.tickTime
+            )
+
+        RemoveFromSubCount ->
+            ( { model | subCount = model.subCount - 1 }, Cmd.none )
 
 
 view : Model -> Html Msg
@@ -182,11 +189,19 @@ logDivDict model dict =
 subscriptions : Model -> Sub Msg
 subscriptions model =
     Sub.batch
-        [ logInfo <| ScheduleAddToLog Info
-        , logWarning <| ScheduleAddToLog Warn
-        , logError <| ScheduleAddToLog Error
-        , every (toFloat model.flags.tickTime) Tick
-        , every (toFloat model.flags.purgeTime) Purge
+        [ Sub.batch
+            [ logInfo <| ScheduleAddToLog Info
+            , logWarning <| ScheduleAddToLog Warn
+            , logError <| ScheduleAddToLog Error
+            ]
+        , Sub.batch <|
+            if model.subCount > 0 || String.length model.filter > 0 then
+                [ every (toFloat model.flags.tickTime) Tick
+                , every (toFloat model.flags.purgeTime) Purge
+                ]
+
+            else
+                []
         ]
 
 
