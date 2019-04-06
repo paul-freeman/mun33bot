@@ -23,7 +23,7 @@ type alias Flags =
 type alias Model =
     { signinStatus : Maybe Bool
     , log : Log.Model
-    , spreadsheet : Maybe Value
+    , spreadsheet : Maybe Spreadsheet
     , missingDataFile : Bool
     }
 
@@ -214,33 +214,68 @@ update msg model =
                         model
 
         GapiClientSheetsSpreadsheetsResponse { method, args, response } ->
-            case method of
-                "create" ->
-                    let
-                        result =
-                            D.decodeValue
-                                (D.field "status" D.int
-                                    |> D.andThen
-                                        (\status ->
-                                            if status /= 200 then
-                                                D.fail "Google Sheets just sent me confusing information and I can't do anything with it."
+            let
+                decodeResult =
+                    D.field "status" D.int
+                        |> D.andThen
+                            (\status ->
+                                if status /= 200 then
+                                    D.fail "response \"status\" not equal to 200"
 
-                                            else
-                                                (D.field "result" <| D.field "spreadsheetId" D.string)
-                                                    |> D.andThen (\fileId -> D.succeed fileId)
-                                        )
-                                )
-                                response
+                                else
+                                    D.field "result" D.value
+                            )
+            in
+            case method of
+                "batchUpdate" ->
+                    let
+                        spreadsheetIdResult =
+                            List.head args
+                                |> Result.fromMaybe "missing head of args"
+                                |> Result.andThen
+                                    (D.decodeValue (D.field "spreadsheetId" D.string)
+                                        >> Result.mapError D.errorToString
+                                    )
                     in
-                    case result of
-                        Ok fileId ->
+                    case ( D.decodeValue decodeResult response, spreadsheetIdResult ) of
+                        ( Ok _, Ok spreadsheetId ) ->
+                            ( model
+                            , gapiClientSheetsSpreadsheetsRequest
+                                { method = "get"
+                                , args =
+                                    [ E.object
+                                        [ ( "spreadsheetId", E.string spreadsheetId )
+                                        ]
+                                    ]
+                                }
+                            )
+
+                        ( Err error, _ ) ->
+                            update
+                                (D.errorToString error
+                                    |> Log.ScheduleAddToLog Log.Error
+                                    |> LogMsg
+                                )
+                                model
+
+                        ( _, Err error ) ->
+                            update
+                                (Log.ScheduleAddToLog Log.Error error |> LogMsg)
+                                model
+
+                "create" ->
+                    case D.decodeValue (D.at [ "result", "spreadsheetId" ] D.string) response of
+                        Ok spreadsheetId ->
                             let
                                 ( newModel, newCmd ) =
                                     update
-                                        (LogMsg <|
-                                            Log.ScheduleAddToLog
-                                                Log.Info
-                                                "I have created a new Google Sheet into which I will store your data. I will try to load it now."
+                                        ([ "I have created a new Google Sheet into "
+                                         , "which I will store your data. I will "
+                                         , "try to set it up for use."
+                                         ]
+                                            |> String.concat
+                                            |> Log.ScheduleAddToLog Log.Info
+                                            |> LogMsg
                                         )
                                         model
                             in
@@ -248,10 +283,34 @@ update msg model =
                             , Cmd.batch
                                 [ newCmd
                                 , gapiClientSheetsSpreadsheetsRequest
-                                    { method = "get"
+                                    { method = "batchUpdate"
                                     , args =
                                         [ E.object
-                                            [ ( "spreadsheetId", E.string fileId )
+                                            [ ( "spreadsheetId", E.string spreadsheetId )
+                                            ]
+                                        , E.object
+                                            [ ( "requests"
+                                              , E.list identity
+                                                    [ E.object
+                                                        [ ( "addSheet"
+                                                          , E.object
+                                                                [ ( "properties"
+                                                                  , E.object
+                                                                        [ ( "sheetId", E.int 1001 )
+                                                                        , ( "title", E.string "accounts" )
+                                                                        , ( "gridProperties"
+                                                                          , E.object
+                                                                                [ ( "columnCount", E.int 2 )
+                                                                                ]
+                                                                          )
+                                                                        , ( "hidden", E.bool True )
+                                                                        ]
+                                                                  )
+                                                                ]
+                                                          )
+                                                        ]
+                                                    ]
+                                              )
                                             ]
                                         ]
                                     }
@@ -260,12 +319,15 @@ update msg model =
 
                         Err error ->
                             update
-                                (LogMsg <|
-                                    Log.ScheduleAddToLog
-                                        Log.Error
-                                    <|
-                                        D.errorToString
-                                            error
+                                ([ "Google Sheets sent me a strange message. "
+                                 , "It seems like it tried to create a new "
+                                 , "data file, but I don't understand what "
+                                 , "it is saying exactly. "
+                                 , D.errorToString error
+                                 ]
+                                    |> String.concat
+                                    |> Log.ScheduleAddToLog Log.Error
+                                    |> LogMsg
                                 )
                                 model
 
@@ -280,28 +342,29 @@ update msg model =
                                                 D.fail "Google Sheets just sent me confusing information and I can't do anything with it."
 
                                             else
-                                                (D.field "result" <| D.field "spreadsheetId" D.string)
-                                                    |> D.andThen (\fileId -> D.succeed fileId)
+                                                D.field "result" decodeSpreadsheet
                                         )
                                 )
                                 response
                     in
                     case result of
-                        Ok fileId ->
+                        Ok spreadsheet ->
                             update
                                 (LogMsg <|
                                     Log.ScheduleAddToLog
                                         Log.Info
                                         "I have received your data from Google Sheets."
                                 )
-                                { model | spreadsheet = Just response, missingDataFile = False }
+                                { model | spreadsheet = Just spreadsheet, missingDataFile = False }
 
                         Err error ->
                             update
                                 (LogMsg <|
                                     Log.ScheduleAddToLog
                                         Log.Error
+                                    <|
                                         "Google Sheets just sent me confusing information and I can't do anything with it."
+                                            ++ D.errorToString error
                                 )
                                 model
 
