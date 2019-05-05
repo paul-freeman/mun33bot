@@ -1,9 +1,13 @@
 port module Mun33Bot exposing (main)
 
 import Browser exposing (application)
-import Browser.Navigation exposing (Key)
+import Browser.Navigation as Nav
 import Css exposing (..)
-import Google.Spreadsheet exposing (..)
+import Google.Client as Client
+import Google.DriveFiles as DriveFiles
+import Google.Spreadsheet as Spreadsheet exposing (Spreadsheet)
+import Google.Spreadsheets as Spreadsheets
+import Google.Spreadsheets.Values as Values
 import Html.Styled exposing (..)
 import Html.Styled.Attributes exposing (..)
 import Html.Styled.Events exposing (..)
@@ -23,21 +27,29 @@ type alias Flags =
 type alias Model =
     { signinStatus : Maybe Bool
     , log : Log.Model
+    , spreadsheetId : SpreadsheetId
     , spreadsheet : Maybe Spreadsheet
-    , missingDataFile : Bool
+    , browserKey : Nav.Key
     }
+
+
+type SpreadsheetId
+    = Unknown
+    | Missing
+    | Id String
 
 
 type Msg
     = Noop
     | ChangeSigninStatus Bool
-    | HandleAuthClick
-    | HandleSignoutClick
-    | CreateNewGoogleSheet
-    | RequestDriveFileList
-    | GapiClientDriveFileResponse ClientResponse
-    | GapiClientSheetsSpreadsheetsResponse ClientResponse
+    | CreatedSpreadsheet { spreadsheetId : String }
+    | FoundId (Maybe { fileId : String })
+    | LoadedSpreadsheet Spreadsheet
     | LogMsg Log.Msg
+    | RequestedNew
+    | RequestedLoad
+    | RunCmd (Cmd Msg)
+    | UpdatedSpreadsheet { spreadsheetId : String }
 
 
 main : Program Flags Model Msg
@@ -52,12 +64,13 @@ main =
         }
 
 
-init : Flags -> Url -> Key -> ( Model, Cmd Msg )
+init : Flags -> Url -> Nav.Key -> ( Model, Cmd Msg )
 init flags url key =
     ( { signinStatus = Nothing
       , log = Log.default
+      , spreadsheetId = Unknown
       , spreadsheet = Nothing
-      , missingDataFile = False
+      , browserKey = key
       }
     , handleClientLoad ()
     )
@@ -111,265 +124,86 @@ update msg model =
                                     )
                                     { model
                                         | signinStatus = Just False
-                                        , spreadsheet = Nothing
+                                        , spreadsheetId = Unknown
                                     }
 
-        HandleAuthClick ->
+        RequestedNew ->
             ( model
-            , gapiAuth2GetAuthInstance
-                { method = "signIn"
-                , args = []
-                }
+            , Spreadsheets.request <| Spreadsheets.CreateSpreadsheet { name = appData }
             )
 
-        HandleSignoutClick ->
-            ( model
-            , gapiAuth2GetAuthInstance
-                { method = "signOut"
-                , args = []
-                }
-            )
-
-        CreateNewGoogleSheet ->
-            ( model
-            , gapiClientSheetsSpreadsheetsRequest
-                { method = "create"
-                , args =
-                    [ E.object []
-                    , Google.Spreadsheet.newSpreadsheet appData
-                    ]
-                }
-            )
-
-        RequestDriveFileList ->
+        RequestedLoad ->
             let
                 ( newModel, newCmd ) =
                     update
-                        (LogMsg <|
-                            Log.ScheduleAddToLog
-                                Log.Info
-                                "I am asking Google Sheets for your data file now."
+                        ("I am asking Google Sheets for your data file now."
+                            |> Log.ScheduleAddToLog Log.Info
+                            |> LogMsg
                         )
                         model
             in
             ( newModel
             , Cmd.batch
                 [ newCmd
-                , gapiClientDriveFileRequest
-                    { method = "list"
-                    , args =
-                        [ E.object
-                            [ ( "q", E.string <| ("name = '" ++ appData ++ "' and trashed = false") )
-                            ]
-                        ]
-                    }
+                , DriveFiles.request <|
+                    DriveFiles.RequestFileIdByName { name = appData }
                 ]
             )
 
-        GapiClientDriveFileResponse { method, args, response } ->
-            case method of
-                "list" ->
-                    let
-                        decodeList =
-                            D.field "files" <| D.list <| D.field "id" D.string
-                    in
-                    case D.decodeValue decodeList response of
-                        Ok fileList ->
-                            case List.head fileList of
-                                Nothing ->
-                                    update
-                                        (LogMsg <|
-                                            Log.ScheduleAddToLog
-                                                Log.Info
-                                                "I could not find a Google Sheet with your data. You can make a new one if you like."
-                                        )
-                                        { model | missingDataFile = True }
+        FoundId maybeId ->
+            case maybeId of
+                Just { fileId } ->
+                    ( { model | spreadsheetId = Id fileId }
+                    , Spreadsheets.request <| Spreadsheets.GetSpreadsheet { spreadsheetId = fileId }
+                    )
 
-                                Just fileId ->
-                                    ( { model | missingDataFile = False }
-                                    , gapiClientSheetsSpreadsheetsRequest
-                                        { method = "get"
-                                        , args =
-                                            [ E.object
-                                                [ ( "spreadsheetId", E.string fileId )
-                                                ]
-                                            ]
-                                        }
-                                    )
-
-                        Err error ->
-                            update
-                                (LogMsg <|
-                                    Log.ScheduleAddToLog Log.Error <|
-                                        D.errorToString error
-                                )
-                                model
-
-                _ ->
+                Nothing ->
                     update
-                        (LogMsg <|
-                            Log.ScheduleAddToLog Log.Info
-                                "unknown GapiClientDriveFileResponse"
+                        ([ "I could not find a Google Sheet "
+                         , "with your data. You can make a "
+                         , "new one if you like."
+                         ]
+                            |> String.concat
+                            |> Log.ScheduleAddToLog Log.Info
+                            |> LogMsg
+                        )
+                        { model | spreadsheetId = Missing }
+
+        CreatedSpreadsheet { spreadsheetId } ->
+            let
+                ( newModel, newCmd ) =
+                    update
+                        ([ "I have created a new Google Sheet into "
+                         , "which I will store your data. I will "
+                         , "try to set it up for use."
+                         ]
+                            |> String.concat
+                            |> Log.ScheduleAddToLog Log.Info
+                            |> LogMsg
                         )
                         model
-
-        GapiClientSheetsSpreadsheetsResponse { method, args, response } ->
-            let
-                decodeResult =
-                    D.field "status" D.int
-                        |> D.andThen
-                            (\status ->
-                                if status /= 200 then
-                                    D.fail "response \"status\" not equal to 200"
-
-                                else
-                                    D.field "result" D.value
-                            )
             in
-            case method of
-                "batchUpdate" ->
-                    let
-                        spreadsheetIdResult =
-                            List.head args
-                                |> Result.fromMaybe "missing head of args"
-                                |> Result.andThen
-                                    (D.decodeValue (D.field "spreadsheetId" D.string)
-                                        >> Result.mapError D.errorToString
-                                    )
-                    in
-                    case ( D.decodeValue decodeResult response, spreadsheetIdResult ) of
-                        ( Ok _, Ok spreadsheetId ) ->
-                            ( model
-                            , gapiClientSheetsSpreadsheetsRequest
-                                { method = "get"
-                                , args =
-                                    [ E.object
-                                        [ ( "spreadsheetId", E.string spreadsheetId )
-                                        ]
-                                    ]
-                                }
-                            )
+            ( newModel
+            , Cmd.batch
+                [ newCmd
+                , Spreadsheets.request <| Spreadsheets.UpdateSpreadsheet { spreadsheetId = spreadsheetId }
+                ]
+            )
 
-                        ( Err error, _ ) ->
-                            update
-                                (D.errorToString error
-                                    |> Log.ScheduleAddToLog Log.Error
-                                    |> LogMsg
-                                )
-                                model
+        UpdatedSpreadsheet { spreadsheetId } ->
+            update Noop model
 
-                        ( _, Err error ) ->
-                            update
-                                (Log.ScheduleAddToLog Log.Error error |> LogMsg)
-                                model
-
-                "create" ->
-                    case D.decodeValue (D.at [ "result", "spreadsheetId" ] D.string) response of
-                        Ok spreadsheetId ->
-                            let
-                                ( newModel, newCmd ) =
-                                    update
-                                        ([ "I have created a new Google Sheet into "
-                                         , "which I will store your data. I will "
-                                         , "try to set it up for use."
-                                         ]
-                                            |> String.concat
-                                            |> Log.ScheduleAddToLog Log.Info
-                                            |> LogMsg
-                                        )
-                                        model
-                            in
-                            ( newModel
-                            , Cmd.batch
-                                [ newCmd
-                                , gapiClientSheetsSpreadsheetsRequest
-                                    { method = "batchUpdate"
-                                    , args =
-                                        [ E.object
-                                            [ ( "spreadsheetId", E.string spreadsheetId )
-                                            ]
-                                        , E.object
-                                            [ ( "requests"
-                                              , E.list identity
-                                                    [ E.object
-                                                        [ ( "addSheet"
-                                                          , E.object
-                                                                [ ( "properties"
-                                                                  , E.object
-                                                                        [ ( "sheetId", E.int 1001 )
-                                                                        , ( "title", E.string "accounts" )
-                                                                        , ( "gridProperties"
-                                                                          , E.object
-                                                                                [ ( "columnCount", E.int 2 )
-                                                                                ]
-                                                                          )
-                                                                        , ( "hidden", E.bool True )
-                                                                        ]
-                                                                  )
-                                                                ]
-                                                          )
-                                                        ]
-                                                    ]
-                                              )
-                                            ]
-                                        ]
-                                    }
-                                ]
-                            )
-
-                        Err error ->
-                            update
-                                ([ "Google Sheets sent me a strange message. "
-                                 , "It seems like it tried to create a new "
-                                 , "data file, but I don't understand what "
-                                 , "it is saying exactly. "
-                                 , D.errorToString error
-                                 ]
-                                    |> String.concat
-                                    |> Log.ScheduleAddToLog Log.Error
-                                    |> LogMsg
-                                )
-                                model
-
-                "get" ->
-                    let
-                        result =
-                            D.decodeValue
-                                (D.field "status" D.int
-                                    |> D.andThen
-                                        (\status ->
-                                            if status /= 200 then
-                                                D.fail "Google Sheets just sent me confusing information and I can't do anything with it."
-
-                                            else
-                                                D.field "result" decodeSpreadsheet
-                                        )
-                                )
-                                response
-                    in
-                    case result of
-                        Ok spreadsheet ->
-                            update
-                                (LogMsg <|
-                                    Log.ScheduleAddToLog
-                                        Log.Info
-                                        "I have received your data from Google Sheets."
-                                )
-                                { model | spreadsheet = Just spreadsheet, missingDataFile = False }
-
-                        Err error ->
-                            update
-                                (LogMsg <|
-                                    Log.ScheduleAddToLog
-                                        Log.Error
-                                    <|
-                                        "Google Sheets just sent me confusing information and I can't do anything with it."
-                                            ++ D.errorToString error
-                                )
-                                model
-
-                _ ->
-                    ( model, Cmd.none )
+        LoadedSpreadsheet spreadsheet ->
+            update
+                (LogMsg <|
+                    Log.ScheduleAddToLog
+                        Log.Info
+                        "I have received your data from Google Sheets."
+                )
+                { model
+                    | spreadsheetId = Id spreadsheet.spreadsheetId
+                    , spreadsheet = Just spreadsheet
+                }
 
         LogMsg logMsg ->
             let
@@ -377,6 +211,9 @@ update msg model =
                     Log.update logMsg model.log
             in
             ( { model | log = logModel }, Cmd.map LogMsg logCmd )
+
+        RunCmd cmd ->
+            ( model, cmd )
 
 
 view : Model -> { title : String, body : List (Node Msg) }
@@ -391,21 +228,21 @@ view model =
                         [ p [] [ text "Waiting for Google to come online." ] ]
 
                     Just False ->
-                        [ button [ onClick HandleAuthClick ] [ text "Authorize" ] ]
+                        [ button [ onClick <| RunCmd Client.signIn ] [ text "Authorize" ] ]
 
                     Just True ->
-                        [ button [ onClick HandleSignoutClick ] [ text "Sign Out" ]
+                        [ button [ onClick <| RunCmd Client.signOut ] [ text "Sign Out" ]
                         , div [] <|
                             case model.spreadsheet of
                                 Just _ ->
                                     []
 
                                 Nothing ->
-                                    if model.missingDataFile then
-                                        [ button [ onClick CreateNewGoogleSheet ] [ text "Create New Google Sheet" ] ]
+                                    if model.spreadsheetId == Missing then
+                                        [ button [ onClick RequestedNew ] [ text "Create New Google Sheet" ] ]
 
                                     else
-                                        [ button [ onClick RequestDriveFileList ] [ text "Load Google Sheet" ] ]
+                                        [ button [ onClick RequestedLoad ] [ text "Load Google Sheet" ] ]
                         ]
             , Html.Styled.map LogMsg <| Log.view model.log
             ]
@@ -420,8 +257,31 @@ subscriptions model =
             []
 
         Just True ->
-            [ gapiClientDriveFilesResponse GapiClientDriveFileResponse
-            , gapiClientSheetsSpreadsheetsResponse GapiClientSheetsSpreadsheetsResponse
+            [ DriveFiles.response
+                (\res ->
+                    case res of
+                        Ok (DriveFiles.FileIdResponse maybeId) ->
+                            FoundId maybeId
+
+                        Err error ->
+                            LogMsg <| Log.ScheduleAddToLog Log.Error error
+                )
+            , Spreadsheets.response
+                (\res ->
+                    case res of
+                        Ok (Spreadsheets.CreatedSpreadsheet { spreadsheetId }) ->
+                            CreatedSpreadsheet { spreadsheetId = spreadsheetId }
+
+                        Ok (Spreadsheets.GotSpreadsheet spreadsheet) ->
+                            LoadedSpreadsheet spreadsheet
+
+                        Ok (Spreadsheets.UpdatedSpreadsheet { spreadsheetId }) ->
+                            UpdatedSpreadsheet { spreadsheetId = spreadsheetId }
+
+                        Err error ->
+                            LogMsg <| Log.ScheduleAddToLog Log.Error error
+                )
+            , Values.gapiClientSheetsSpreadsheetsValuesResponse (always Noop)
             ]
 
         Just False ->
@@ -440,19 +300,6 @@ onUrlChange url =
     Noop
 
 
-type alias ClientRequest =
-    { method : String
-    , args : List Value
-    }
-
-
-type alias ClientResponse =
-    { method : String
-    , args : List Value
-    , response : Value
-    }
-
-
 
 -- COMMAND PORTS
 
@@ -460,26 +307,11 @@ type alias ClientResponse =
 port handleClientLoad : () -> Cmd msg
 
 
-port gapiAuth2GetAuthInstance : ClientRequest -> Cmd msg
-
-
-port gapiClientDriveFileRequest : ClientRequest -> Cmd msg
-
-
-port gapiClientSheetsSpreadsheetsRequest : ClientRequest -> Cmd msg
-
-
 
 -- SUBSCRIPTION PORTS
 
 
 port updatedSigninStatus : (Bool -> msg) -> Sub msg
-
-
-port gapiClientDriveFilesResponse : (ClientResponse -> msg) -> Sub msg
-
-
-port gapiClientSheetsSpreadsheetsResponse : (ClientResponse -> msg) -> Sub msg
 
 
 appData : String

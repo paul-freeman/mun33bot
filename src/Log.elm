@@ -162,7 +162,7 @@ logDivDict model dict =
 
                                         else
                                             [ longAgo
-                                                // millisecsPerSecond
+                                                // millisecsPerMinute
                                                 |> String.fromInt
                                                 |> text
                                             , text " min ago: "
