@@ -2,15 +2,15 @@ port module Mun33Bot exposing (main)
 
 import Browser exposing (application)
 import Browser.Navigation as Nav
-import Css exposing (..)
 import Google.Client as Client
 import Google.DriveFiles as DriveFiles
 import Google.Spreadsheet as Spreadsheet exposing (Spreadsheet)
 import Google.Spreadsheets as Spreadsheets
 import Google.Spreadsheets.Values as Values
-import Html.Styled exposing (..)
-import Html.Styled.Attributes exposing (..)
-import Html.Styled.Events exposing (..)
+import Google.Spreadsheets.Values.ValueRange exposing (ValueRange)
+import Html exposing (..)
+import Html.Attributes exposing (..)
+import Html.Events exposing (..)
 import Http exposing (..)
 import Json.Decode as D
 import Json.Encode as E exposing (Value)
@@ -18,38 +18,6 @@ import Log
 import Task
 import Url exposing (Url)
 import VirtualDom exposing (Node)
-
-
-type alias Flags =
-    ()
-
-
-type alias Model =
-    { signinStatus : Maybe Bool
-    , log : Log.Model
-    , spreadsheetId : SpreadsheetId
-    , spreadsheet : Maybe Spreadsheet
-    , browserKey : Nav.Key
-    }
-
-
-type SpreadsheetId
-    = Unknown
-    | Missing
-    | Id String
-
-
-type Msg
-    = Noop
-    | ChangeSigninStatus Bool
-    | CreatedSpreadsheet { spreadsheetId : String }
-    | FoundId (Maybe { fileId : String })
-    | LoadedSpreadsheet Spreadsheet
-    | LogMsg Log.Msg
-    | RequestedNew
-    | RequestedLoad
-    | RunCmd (Cmd Msg)
-    | UpdatedSpreadsheet { spreadsheetId : String }
 
 
 main : Program Flags Model Msg
@@ -64,16 +32,40 @@ main =
         }
 
 
+type alias Model =
+    { accounts : Maybe ValueRange
+    , browserKey : Nav.Key
+    , currentView : View
+    , flags : Flags
+    , signinStatus : Maybe Bool
+    , spreadsheetId : SpreadsheetId
+    , url : Url
+    }
+
+
 init : Flags -> Url -> Nav.Key -> ( Model, Cmd Msg )
 init flags url key =
-    ( { signinStatus = Nothing
-      , log = Log.default
-      , spreadsheetId = Unknown
-      , spreadsheet = Nothing
+    ( { accounts = Nothing
       , browserKey = key
+      , currentView = MainView
+      , flags = flags
+      , signinStatus = Nothing
+      , spreadsheetId = Unknown
+      , url = url
       }
     , handleClientLoad ()
     )
+
+
+type Msg
+    = Noop
+    | ChangeSigninStatus Bool
+    | ChangeView View
+    | CreatedSpreadsheet { spreadsheetId : String }
+    | FoundDataFile (Maybe { fileId : String })
+    | RunCmd (Cmd Msg)
+    | UpdatedAccountData { accounts : ValueRange }
+    | UpdatedSpreadsheet { spreadsheetId : String }
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -83,170 +75,180 @@ update msg model =
             ( model, Cmd.none )
 
         ChangeSigninStatus isSignedIn ->
-            case model.signinStatus of
-                Nothing ->
-                    update
-                        (if isSignedIn then
-                            LogMsg <|
-                                Log.ScheduleAddToLog
-                                    Log.Info
-                                    "Google has notified me that you are signed in."
-
-                         else
-                            LogMsg <|
-                                Log.ScheduleAddToLog
-                                    Log.Info
-                                    "Google has notified me that you are not signed in."
-                        )
-                        { model | signinStatus = Just isSignedIn }
-
-                Just signInStatus ->
-                    if signInStatus == isSignedIn then
-                        ( model, Cmd.none )
-
-                    else
-                        case isSignedIn of
-                            True ->
-                                update
-                                    (LogMsg <|
-                                        Log.ScheduleAddToLog
-                                            Log.Info
-                                            "You have been logged in."
-                                    )
-                                    { model | signinStatus = Just True }
-
-                            False ->
-                                update
-                                    (LogMsg <|
-                                        Log.ScheduleAddToLog
-                                            Log.Info
-                                            "You have been logged out."
-                                    )
-                                    { model
-                                        | signinStatus = Just False
-                                        , spreadsheetId = Unknown
-                                    }
-
-        RequestedNew ->
-            ( model
-            , Spreadsheets.request <| Spreadsheets.CreateSpreadsheet { name = appData }
-            )
-
-        RequestedLoad ->
-            let
-                ( newModel, newCmd ) =
-                    update
-                        ("I am asking Google Sheets for your data file now."
-                            |> Log.ScheduleAddToLog Log.Info
-                            |> LogMsg
-                        )
-                        model
-            in
-            ( newModel
-            , Cmd.batch
-                [ newCmd
+            if isSignedIn then
+                ( { model | signinStatus = Just True }
                 , DriveFiles.request <|
                     DriveFiles.RequestFileIdByName { name = appData }
-                ]
+                )
+
+            else
+                let
+                    ( newModel, newCmd ) =
+                        init model.flags model.url model.browserKey
+                in
+                ( { newModel | signinStatus = Just False }, newCmd )
+
+        ChangeView newView ->
+            ( { model | currentView = newView }, Cmd.none )
+
+        CreatedSpreadsheet { spreadsheetId } ->
+            ( model
+            , Spreadsheets.request <|
+                Spreadsheets.UpdateSpreadsheet { spreadsheetId = spreadsheetId }
             )
 
-        FoundId maybeId ->
+        FoundDataFile maybeId ->
             case maybeId of
                 Just { fileId } ->
                     ( { model | spreadsheetId = Id fileId }
-                    , Spreadsheets.request <| Spreadsheets.GetSpreadsheet { spreadsheetId = fileId }
+                    , Values.send <|
+                        Values.GetAccounts
+                            { spreadsheetId = fileId }
                     )
 
                 Nothing ->
-                    update
-                        ([ "I could not find a Google Sheet "
-                         , "with your data. You can make a "
-                         , "new one if you like."
-                         ]
-                            |> String.concat
-                            |> Log.ScheduleAddToLog Log.Info
-                            |> LogMsg
-                        )
-                        { model | spreadsheetId = Missing }
-
-        CreatedSpreadsheet { spreadsheetId } ->
-            let
-                ( newModel, newCmd ) =
-                    update
-                        ([ "I have created a new Google Sheet into "
-                         , "which I will store your data. I will "
-                         , "try to set it up for use."
-                         ]
-                            |> String.concat
-                            |> Log.ScheduleAddToLog Log.Info
-                            |> LogMsg
-                        )
-                        model
-            in
-            ( newModel
-            , Cmd.batch
-                [ newCmd
-                , Spreadsheets.request <| Spreadsheets.UpdateSpreadsheet { spreadsheetId = spreadsheetId }
-                ]
-            )
-
-        UpdatedSpreadsheet { spreadsheetId } ->
-            update Noop model
-
-        LoadedSpreadsheet spreadsheet ->
-            update
-                (LogMsg <|
-                    Log.ScheduleAddToLog
-                        Log.Info
-                        "I have received your data from Google Sheets."
-                )
-                { model
-                    | spreadsheetId = Id spreadsheet.spreadsheetId
-                    , spreadsheet = Just spreadsheet
-                }
-
-        LogMsg logMsg ->
-            let
-                ( logModel, logCmd ) =
-                    Log.update logMsg model.log
-            in
-            ( { model | log = logModel }, Cmd.map LogMsg logCmd )
+                    ( { model | spreadsheetId = Missing }
+                    , Spreadsheets.request <|
+                        Spreadsheets.CreateSpreadsheet { name = appData }
+                    )
 
         RunCmd cmd ->
             ( model, cmd )
+
+        UpdatedAccountData { accounts } ->
+            ( { model | accounts = Just accounts }, Cmd.none )
+
+        UpdatedSpreadsheet { spreadsheetId } ->
+            ( { model | spreadsheetId = Id spreadsheetId }, Cmd.none )
+
+
+type alias Flags =
+    ()
+
+
+type SpreadsheetId
+    = Unknown
+    | Missing
+    | Id String
+
+
+type View
+    = MainView
+    | AccountsView ValueRange
 
 
 view : Model -> { title : String, body : List (Node Msg) }
 view model =
     { title = "Mun33Bot"
     , body =
-        List.map toUnstyled
-            [ p [] [ text "Drive API Quickstart" ]
-            , div [] <|
+        [ section [ class "section" ]
+            [ div [ class "container" ] <|
                 case model.signinStatus of
                     Nothing ->
-                        [ p [] [ text "Waiting for Google to come online." ] ]
+                        [ customButton
+                            [ class "button is-primary is-outlined is-fullwidth is-loading"
+                            , disabled True
+                            ]
+                            [ text "Mun33Bot is loading..." ]
+                        ]
 
                     Just False ->
-                        [ button [ onClick <| RunCmd Client.signIn ] [ text "Authorize" ] ]
+                        [ customButton
+                            [ class "button is-primary is-outlined is-fullwidth"
+                            , disabled True
+                            ]
+                            [ text "Please authorize this app to use Google..." ]
+                        , customButton
+                            [ class "button is-primary is-fullwidth"
+                            , onClick <| RunCmd Client.signIn
+                            ]
+                            [ text "Authorize" ]
+                        ]
 
                     Just True ->
-                        [ button [ onClick <| RunCmd Client.signOut ] [ text "Sign Out" ]
-                        , div [] <|
-                            case model.spreadsheet of
-                                Just _ ->
-                                    []
+                        case model.spreadsheetId of
+                            Unknown ->
+                                [ customButton
+                                    [ class "button is-primary is-outlined is-fullwidth is-loading"
+                                    , disabled True
+                                    ]
+                                    [ text "Loading data..." ]
+                                , customButton
+                                    [ class "button is-danger is-fullwidth"
+                                    , onClick <| RunCmd Client.signOut
+                                    ]
+                                    [ text "Sign Out" ]
+                                ]
 
-                                Nothing ->
-                                    if model.spreadsheetId == Missing then
-                                        [ button [ onClick RequestedNew ] [ text "Create New Google Sheet" ] ]
+                            Missing ->
+                                [ customButton
+                                    [ class "button is-danger is-outlined is-fullwidth"
+                                    , disabled True
+                                    ]
+                                    [ text "Failed to load data" ]
+                                , customButton
+                                    [ class "button is-danger is-fullwidth"
+                                    , onClick <| RunCmd Client.signOut
+                                    ]
+                                    [ text "Sign Out" ]
+                                ]
 
-                                    else
-                                        [ button [ onClick RequestedLoad ] [ text "Load Google Sheet" ] ]
-                        ]
-            , Html.Styled.map LogMsg <| Log.view model.log
+                            Id spreadsheetId ->
+                                case model.currentView of
+                                    MainView ->
+                                        [ mainView model ]
+
+                                    AccountsView accounts ->
+                                        [ Html.div [ class "Account-view" ] <|
+                                            (case accounts.values of
+                                                Nothing ->
+                                                    [ customButton
+                                                        [ class "button is-info is-outlined is-fullwidth"
+                                                        , disabled True
+                                                        ]
+                                                        [ text "No accounts" ]
+                                                    ]
+
+                                                Just values ->
+                                                    []
+                                            )
+                                                ++ [ customButton
+                                                        [ class "button is-primary is-fullwidth" ]
+                                                        [ text "Add new account" ]
+                                                   ]
+                                        , customButton
+                                            [ class "button is-primary is-fullwidth"
+                                            , onClick <| ChangeView MainView
+                                            ]
+                                            [ text "Back" ]
+                                        ]
             ]
+        ]
     }
+
+
+mainView model =
+    Html.div [] <|
+        [ case model.accounts of
+            Nothing ->
+                customButton
+                    [ class "button is-primary is-fullwidth"
+                    , disabled True
+                    ]
+                    [ text "Accounts" ]
+
+            Just accounts ->
+                customButton
+                    [ class "button is-primary is-fullwidth"
+                    , onClick <| ChangeView <| AccountsView accounts
+                    ]
+                    [ text "Accounts" ]
+        , customButton
+            [ class "button is-danger is-fullwidth"
+            , onClick <| RunCmd Client.signOut
+            ]
+            [ text "Sign Out" ]
+        ]
 
 
 subscriptions : Model -> Sub Msg
@@ -261,10 +263,10 @@ subscriptions model =
                 (\res ->
                     case res of
                         Ok (DriveFiles.FileIdResponse maybeId) ->
-                            FoundId maybeId
+                            FoundDataFile maybeId
 
                         Err error ->
-                            LogMsg <| Log.ScheduleAddToLog Log.Error error
+                            Noop
                 )
             , Spreadsheets.response
                 (\res ->
@@ -273,20 +275,27 @@ subscriptions model =
                             CreatedSpreadsheet { spreadsheetId = spreadsheetId }
 
                         Ok (Spreadsheets.GotSpreadsheet spreadsheet) ->
-                            LoadedSpreadsheet spreadsheet
+                            Noop
 
                         Ok (Spreadsheets.UpdatedSpreadsheet { spreadsheetId }) ->
-                            UpdatedSpreadsheet { spreadsheetId = spreadsheetId }
+                            Noop
 
                         Err error ->
-                            LogMsg <| Log.ScheduleAddToLog Log.Error error
+                            Noop
                 )
-            , Values.gapiClientSheetsSpreadsheetsValuesResponse (always Noop)
+            , Values.receive
+                (\res ->
+                    case res of
+                        Ok (Values.GotAccounts valueRange) ->
+                            UpdatedAccountData { accounts = valueRange }
+
+                        _ ->
+                            Noop
+                )
             ]
 
         Just False ->
             []
-    , [ Sub.map LogMsg <| Log.subscriptions model.log ]
     ]
         |> List.concat
         |> Sub.batch
@@ -317,3 +326,13 @@ port updatedSigninStatus : (Bool -> msg) -> Sub msg
 appData : String
 appData =
     "mun33bot_appData_v0.1.0"
+
+
+customButton : List (Attribute msg) -> List (Html msg) -> Html msg
+customButton attr html =
+    Html.button attr html
+        |> List.singleton
+        |> Html.div
+            [ Html.Attributes.class "control"
+            , Html.Attributes.style "padding" "3px 0px"
+            ]

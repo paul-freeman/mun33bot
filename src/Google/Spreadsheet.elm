@@ -42,16 +42,6 @@ decode =
         |> required "spreadsheetId" D.string
         |> required "properties" SpreadsheetProperties.decode
         |> required "sheets" (D.list Sheet.decode)
-        |> optional "namedRanges" (D.map Just <| D.list decodeNamedRange) Nothing
+        |> optional "namedRanges" (D.map Just <| D.list D.value) Nothing
         |> required "spreadsheetUrl" D.string
-        |> optional "developerMetadata" (D.map Just <| D.list decodeDeveloperMetadata) Nothing
-
-
-decodeNamedRange : Decoder NamedRange
-decodeNamedRange =
-    D.succeed E.null
-
-
-decodeDeveloperMetadata : Decoder DeveloperMetadata
-decodeDeveloperMetadata =
-    D.succeed E.null
+        |> optional "developerMetadata" (D.map Just <| D.list D.value) Nothing
