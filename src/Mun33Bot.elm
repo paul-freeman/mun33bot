@@ -2,6 +2,7 @@ port module Mun33Bot exposing (main)
 
 import Browser exposing (application)
 import Browser.Navigation as Nav
+import Char
 import Google.Client as Client
 import Google.DriveFiles as DriveFiles
 import Google.Spreadsheet as Spreadsheet exposing (Spreadsheet)
@@ -15,6 +16,7 @@ import Http exposing (..)
 import Json.Decode as D
 import Json.Encode as E exposing (Value)
 import Log
+import Parser exposing ((|.), (|=), DeadEnd, Parser)
 import Task
 import Url exposing (Url)
 import VirtualDom exposing (Node)
@@ -40,6 +42,9 @@ type alias Model =
     , signinStatus : Maybe Bool
     , spreadsheetId : SpreadsheetId
     , url : Url
+
+    -- add account
+    , addAccountNameState : String
     }
 
 
@@ -52,6 +57,9 @@ init flags url key =
       , signinStatus = Nothing
       , spreadsheetId = Unknown
       , url = url
+
+      -- add account
+      , addAccountNameState = ""
       }
     , handleClientLoad ()
     )
@@ -66,6 +74,8 @@ type Msg
     | RunCmd (Cmd Msg)
     | UpdatedAccountData { accounts : ValueRange }
     | UpdatedSpreadsheet { spreadsheetId : String }
+      -- add account
+    | ChangeAddAccountNameInput String
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -121,6 +131,15 @@ update msg model =
         UpdatedSpreadsheet { spreadsheetId } ->
             ( { model | spreadsheetId = Id spreadsheetId }, Cmd.none )
 
+        -- add account
+        ChangeAddAccountNameInput newInput ->
+            case Parser.run currencyParser newInput of
+                Ok _ ->
+                    ( { model | addAccountNameState = newInput }, Cmd.none )
+
+                Err deadEnds ->
+                    ( model, Cmd.none )
+
 
 type alias Flags =
     ()
@@ -134,120 +153,138 @@ type SpreadsheetId
 
 type View
     = MainView
-    | AccountsView ValueRange
+    | AccountsView
+    | AddAccountView
 
 
 view : Model -> { title : String, body : List (Node Msg) }
 view model =
     { title = "Mun33Bot"
     , body =
-        [ section [ class "section" ]
+        [ section [ id "view", class "section" ]
             [ div [ class "container" ] <|
                 case model.signinStatus of
                     Nothing ->
-                        [ customButton
-                            [ class "button is-primary is-outlined is-fullwidth is-loading"
-                            , disabled True
-                            ]
-                            [ text "Mun33Bot is loading..." ]
+                        [ p [ class "title has-text-centered" ] [ text "Mun33Bot" ]
+                        , bulmaText { color = Info, text = "Mun33Bot is loading..." }
                         ]
 
                     Just False ->
-                        [ customButton
-                            [ class "button is-primary is-outlined is-fullwidth"
-                            , disabled True
-                            ]
-                            [ text "Please authorize this app to use Google..." ]
-                        , customButton
-                            [ class "button is-primary is-fullwidth"
-                            , onClick <| RunCmd Client.signIn
-                            ]
-                            [ text "Authorize" ]
+                        [ p [ class "title has-text-centered" ] [ text "Mun33Bot" ]
+                        , bulmaText { color = Info, text = "Please authorize this app to use Google..." }
+                        , bulmaButton
+                            { color = Primary
+                            , onClick = Just <| RunCmd Client.signIn
+                            , text = "Authorize"
+                            }
                         ]
 
                     Just True ->
                         case model.spreadsheetId of
                             Unknown ->
-                                [ customButton
-                                    [ class "button is-primary is-outlined is-fullwidth is-loading"
-                                    , disabled True
-                                    ]
-                                    [ text "Loading data..." ]
-                                , customButton
-                                    [ class "button is-danger is-fullwidth"
-                                    , onClick <| RunCmd Client.signOut
-                                    ]
-                                    [ text "Sign Out" ]
+                                [ p [ class "title has-text-centered" ] [ text "Mun33Bot" ]
+                                , bulmaText { color = Info, text = "Loading data..." }
+                                , bulmaButton
+                                    { color = Danger
+                                    , onClick = Just <| RunCmd Client.signOut
+                                    , text = "Sign Out"
+                                    }
                                 ]
 
                             Missing ->
-                                [ customButton
-                                    [ class "button is-danger is-outlined is-fullwidth"
-                                    , disabled True
-                                    ]
-                                    [ text "Failed to load data" ]
-                                , customButton
-                                    [ class "button is-danger is-fullwidth"
-                                    , onClick <| RunCmd Client.signOut
-                                    ]
-                                    [ text "Sign Out" ]
+                                [ p [ class "title has-text-centered" ] [ text "Mun33Bot" ]
+                                , bulmaText
+                                    { color = Danger
+                                    , text = "Failed to load data"
+                                    }
+                                , bulmaButton
+                                    { color = Danger
+                                    , onClick = Just <| RunCmd Client.signOut
+                                    , text = "Sign Out"
+                                    }
                                 ]
 
                             Id spreadsheetId ->
-                                case model.currentView of
-                                    MainView ->
-                                        [ mainView model ]
+                                [ model
+                                    |> (case model.currentView of
+                                            MainView ->
+                                                mainView
 
-                                    AccountsView accounts ->
-                                        [ Html.div [ class "Account-view" ] <|
-                                            (case accounts.values of
-                                                Nothing ->
-                                                    [ customButton
-                                                        [ class "button is-info is-outlined is-fullwidth"
-                                                        , disabled True
-                                                        ]
-                                                        [ text "No accounts" ]
-                                                    ]
+                                            AccountsView ->
+                                                accountsView
 
-                                                Just values ->
-                                                    []
-                                            )
-                                                ++ [ customButton
-                                                        [ class "button is-primary is-fullwidth" ]
-                                                        [ text "Add new account" ]
-                                                   ]
-                                        , customButton
-                                            [ class "button is-primary is-fullwidth"
-                                            , onClick <| ChangeView MainView
-                                            ]
-                                            [ text "Back" ]
-                                        ]
+                                            AddAccountView ->
+                                                addAccountView
+                                       )
+                                ]
             ]
         ]
     }
 
 
 mainView model =
-    Html.div [] <|
-        [ case model.accounts of
+    Html.div [ id "mainView" ] <|
+        [ p [ class "title has-text-centered" ] [ text "Mun33Bot" ]
+        , case model.accounts of
             Nothing ->
-                customButton
-                    [ class "button is-primary is-fullwidth"
-                    , disabled True
-                    ]
-                    [ text "Accounts" ]
+                bulmaButton
+                    { color = Primary
+                    , onClick = Nothing
+                    , text = "Accounts"
+                    }
 
             Just accounts ->
-                customButton
-                    [ class "button is-primary is-fullwidth"
-                    , onClick <| ChangeView <| AccountsView accounts
-                    ]
-                    [ text "Accounts" ]
-        , customButton
-            [ class "button is-danger is-fullwidth"
-            , onClick <| RunCmd Client.signOut
-            ]
-            [ text "Sign Out" ]
+                bulmaButton
+                    { color = Primary
+                    , onClick = Just <| ChangeView AccountsView
+                    , text = "Accounts"
+                    }
+        , bulmaButton
+            { color = Danger
+            , onClick = Just <| RunCmd Client.signOut
+            , text = "Sign Out"
+            }
+        ]
+
+
+accountsView : Model -> Html Msg
+accountsView model =
+    Html.div [ id "accountsView" ] <|
+        [ p [ class "title has-text-centered" ] [ text "Accounts" ]
+        , case model.accounts |> Maybe.andThen .values of
+            Nothing ->
+                bulmaText { color = Info, text = "No accounts" }
+
+            Just values ->
+                div [] []
+        , bulmaButton
+            { color = Primary
+            , onClick = Just <| ChangeView AddAccountView
+            , text = "Add new account"
+            }
+        , bulmaButton
+            { color = Primary
+            , onClick = Just <| ChangeView MainView
+            , text = "Back"
+            }
+        ]
+
+
+addAccountView : Model -> Html Msg
+addAccountView model =
+    Html.div [ id "addAccountView" ] <|
+        [ p [ class "title has-text-centered" ] [ text "Add account" ]
+        , bulmaInput { label = "Name", placeholder = "Checking account" }
+        , bulmaDollarInput
+            { label = "Balance"
+            , onInput = ChangeAddAccountNameInput
+            , value = model.addAccountNameState
+            }
+        , bulmaButton
+            { color = Primary
+            , onClick = Just <| ChangeView AddAccountView
+            , text = "Back"
+            }
         ]
 
 
@@ -328,11 +365,208 @@ appData =
     "mun33bot_appData_v0.1.0"
 
 
-customButton : List (Attribute msg) -> List (Html msg) -> Html msg
-customButton attr html =
-    Html.button attr html
-        |> List.singleton
-        |> Html.div
-            [ Html.Attributes.class "control"
-            , Html.Attributes.style "padding" "3px 0px"
+bulmaButton :
+    { onClick : Maybe Msg
+    , text : String
+    , color : BulmaColor
+    }
+    -> Html Msg
+bulmaButton config =
+    div [ class "field" ]
+        [ case config.onClick of
+            Nothing ->
+                div [ class "control" ]
+                    [ button
+                        [ classList
+                            [ ( "button", True )
+                            , ( "is-fullwidth", True )
+                            , ( toStringBulmaColors config.color, True )
+                            ]
+                        , disabled True
+                        ]
+                        [ text config.text ]
+                    ]
+
+            Just msg ->
+                div [ class "control" ]
+                    [ button
+                        [ classList
+                            [ ( "button", True )
+                            , ( "is-fullwidth", True )
+                            , ( toStringBulmaColors config.color, True )
+                            ]
+                        , onClick msg
+                        ]
+                        [ text config.text ]
+                    ]
+        ]
+
+
+bulmaText : { color : BulmaColor, text : String } -> Html msg
+bulmaText { color, text } =
+    div [ class "field" ]
+        [ div [ class "control" ]
+            [ input
+                [ classList
+                    [ ( "input", True )
+                    , ( toStringBulmaColors color, True )
+                    , ( "has-text-centered", True )
+                    ]
+                , type_ "text"
+                , value text
+                , readonly True
+                ]
+                []
             ]
+        ]
+
+
+bulmaInput : { label : String, placeholder : String } -> Html msg
+bulmaInput config =
+    div [ class "field" ]
+        [ label [ class "label" ] [ text config.label ]
+        , div [ class "control" ]
+            [ input
+                [ class "input"
+                , type_ "text"
+                , placeholder config.placeholder
+                ]
+                []
+            ]
+        ]
+
+
+bulmaDollarInput :
+    { label : String
+    , onInput : String -> Msg
+    , value : String
+    }
+    -> Html Msg
+bulmaDollarInput config =
+    div [ class "field" ]
+        [ label [ class "label" ] [ text config.label ]
+        , div
+            [ classList
+                [ ( "control", True )
+                , ( "has-icons-left", True )
+                ]
+            ]
+            [ input
+                [ class "input"
+                , type_ "text"
+                , placeholder "100.00"
+                , onInput config.onInput
+                , value config.value
+                ]
+                []
+            , span
+                [ classList
+                    [ ( "icon", True )
+                    , ( "is-left", True )
+                    ]
+                ]
+                [ i [ class "fas fa-dollar-sign" ] [] ]
+            ]
+        ]
+
+
+type BulmaColor
+    = Primary
+    | Link
+    | Info
+    | Success
+    | Warning
+    | Danger
+
+
+toStringBulmaColors : BulmaColor -> String
+toStringBulmaColors bc =
+    case bc of
+        Primary ->
+            "is-primary"
+
+        Link ->
+            "is-link"
+
+        Info ->
+            "is-info"
+
+        Success ->
+            "is-success"
+
+        Warning ->
+            "is-warning"
+
+        Danger ->
+            "is-danger"
+
+
+currencyParser : Parser Float
+currencyParser =
+    Parser.oneOf
+        [ Parser.succeed 0.0
+            |. Parser.end
+        , Parser.succeed identity
+            |. Parser.symbol "."
+            |= Parser.oneOf
+                [ Parser.succeed 0.0
+                    |. Parser.end
+                , Parser.succeed (\cents -> cents / 100)
+                    |= centsParser
+                    |. Parser.end
+                ]
+        , Parser.succeed (\dollars cents -> toFloat dollars + cents / 100)
+            |= dollarParser
+            |= Parser.oneOf
+                [ Parser.succeed 0.0
+                    |. Parser.end
+                , Parser.succeed identity
+                    |. Parser.symbol "."
+                    |= Parser.oneOf
+                        [ Parser.succeed 0.0
+                            |. Parser.end
+                        , Parser.succeed (\cents -> cents / 100.0)
+                            |= centsParser
+                            |. Parser.end
+                        ]
+                ]
+        ]
+
+
+dollarParser : Parser Int
+dollarParser =
+    (Parser.getChompedString <| Parser.chompWhile Char.isDigit)
+        |> Parser.andThen
+            (\intStr ->
+                case String.toInt intStr of
+                    Just int ->
+                        Parser.succeed int
+
+                    Nothing ->
+                        Parser.problem "could not convert dollars to integer"
+            )
+
+
+centsParser : Parser Float
+centsParser =
+    (Parser.getChompedString <|
+        (Parser.chompIf Char.isDigit
+            |> Parser.andThen
+                (always
+                    (Parser.oneOf
+                        [ Parser.end
+                        , Parser.chompIf Char.isDigit
+                        ]
+                    )
+                )
+        )
+    )
+        |> Parser.andThen
+            (\intStr ->
+                case String.toInt intStr of
+                    Just int ->
+                        Parser.succeed <| toFloat int / 100.0
+
+                    Nothing ->
+                        Parser.problem "could not convert cents to integer"
+            )
